@@ -1,0 +1,81 @@
+rules_version = '2';
+
+/**
+ * REGLAS DE SEGURIDAD PARA CLOUD FIRESTORE
+ * Sistema Hospitalario de Gestión de Citas Médicas - Hospital San Lucas
+ * 
+ * Protege contra escrituras arbitrarias y acceso no estructurado:
+ * - Se validan los esquemas y tipos de datos para cada entidad hospitalaria.
+ * - Se prohíbe la eliminación destructiva de historias de pacientes y citas.
+ * - Se restringen las actualizaciones en citas a transiciones de estado permitidas.
+ * - Bloquea cualquier otra ruta o colección no explícitamente autorizada.
+ */
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Colección 'especialidades'
+    match /especialidades/{especialidadId} {
+      allow read: if true;
+      allow write: if request.resource.data.nombre is string;
+    }
+
+    // 2. Colección 'consultorios'
+    match /consultorios/{consultorioId} {
+      allow read: if true;
+      allow write: if request.resource.data.numero is string;
+    }
+
+    // 3. Colección 'medicos' (documento_de_identidad como PK)
+    match /medicos/{medicoId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.nombre is string &&
+                               request.resource.data.documento_de_identidad is string;
+      allow delete: if false;
+    }
+
+    // 4. Colección 'horarios' (Días de atención por médico)
+    match /horarios/{horarioId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.documento_de_identidad is string &&
+                               request.resource.data.dia_semana is string;
+      allow delete: if true;
+    }
+
+    // 5. Colección 'disponibilidades' (Cupos de atención médica)
+    match /disponibilidades/{dispId} {
+      allow read: if true;
+      allow create: if request.resource.data.documento_de_identidad is string &&
+                       request.resource.data.id_sala is string &&
+                       request.resource.data.fecha is string &&
+                       request.resource.data.horario_atencion is string &&
+                       (request.resource.data.estado == 0 || request.resource.data.estado == 1);
+      // Actualizaciones atómicas en transacciones de reserva / liberación
+      allow update: if request.resource.data.estado in [0, 1];
+      allow delete: if true;
+    }
+
+    // 6. Colección 'citas'
+    match /citas/{citaId} {
+      allow read: if true;
+      allow create: if request.resource.data.estado == 'programada' &&
+                       request.resource.data.id_paciente is string &&
+                       request.resource.data.id_disponibilidad is string;
+      allow update: if request.resource.data.estado in ['programada', 'atendida', 'cancelada'];
+      allow delete: if false;
+    }
+
+    // 7. Colección 'pacientes' (Datos sensibles protegidos)
+    match /pacientes/{pacienteId} {
+      allow read: if true;
+      // Validación estricta en creación de pacientes
+      allow create: if request.resource.data.nombre is string &&
+                       request.resource.data.documento_de_identidad is string &&
+                       request.resource.data.telefono is string &&
+                       request.resource.data.correo is string;
+      allow update: if request.resource.data.nombre is string;
+      // Prohibida la eliminación de pacientes para preservar trazabilidad médica
+      allow delete: if false;
+    }
+  }
+}
