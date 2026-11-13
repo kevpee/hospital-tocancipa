@@ -41,18 +41,33 @@ export default function PacientesPage() {
       setCargando(true);
       const res = await fetch("/api/pacientes");
       const json = await res.json();
-      if (json.success && Array.isArray(json.data)) {
-        setPacientes(json.data);
+      if (!res.ok || !json.success || !Array.isArray(json.data)) {
+        throw new Error(json.message || "No fue posible consultar pacientes.");
       }
-    } catch {
-      setMensajeError("Error de conexión al cargar pacientes desde la API.");
+      setPacientes(json.data);
+      setMensajeError("");
+    } catch (error) {
+      setMensajeError(error.message || "Error de conexión al cargar pacientes desde la API.");
     } finally {
       setCargando(false);
     }
   };
 
   useEffect(() => {
-    cargarPacientes();
+    let activo = true;
+    fetch("/api/pacientes")
+      .then(async (response) => {
+        const json = await response.json();
+        if (!response.ok || !json.success || !Array.isArray(json.data)) {
+          throw new Error(json.message || "No fue posible consultar los pacientes.");
+        }
+        return json.data;
+      })
+      .then((data) => { if (activo) setPacientes(data); })
+      .catch((error) => { if (activo) setMensajeError(error.message || "Error de conexión al cargar pacientes desde la API."); })
+      .finally(() => { if (activo) setCargando(false); });
+
+    return () => { activo = false; };
   }, []);
 
   const handleChange = (e) => {
@@ -139,7 +154,7 @@ export default function PacientesPage() {
       title="Directorio de Pacientes"
       subtitle="Gestión de historias clínicas y registro de usuarios del hospital"
     >
-      <div className="space-y-6">
+      <div className="space-y-6 registry-page">
         {/* Notificaciones */}
         {mensajeExito && (
           <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900 shadow-xs">
@@ -155,12 +170,19 @@ export default function PacientesPage() {
           </div>
         )}
 
+        <section className="module-intro">
+          <span className="module-intro-icon"><Users size={20} /></span>
+          <div className="module-intro-copy"><span>DIRECTORIO CLÍNICO</span><h2>Pacientes</h2><p>Consulta y registra la información de contacto de las personas atendidas.</p></div>
+          <div className="module-count"><strong>{pacientes.length}</strong><span>registros</span></div>
+        </section>
+
         {/* Barra de Acciones y Búsqueda */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
+        <div className="registry-toolbar flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
           <div className="relative w-full sm:w-80">
             <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
             <input
               type="text"
+              aria-label="Buscar pacientes por nombre, documento o correo"
               value={busqueda}
               onChange={(e) => setBusqueda(e.target.value)}
               placeholder="Buscar por nombre, documento o correo..."
@@ -190,8 +212,8 @@ export default function PacientesPage() {
         </div>
 
         {/* TABLA PRINCIPAL DE PACIENTES */}
-        <div className="rounded-2xl border border-slate-200/90 bg-white shadow-xs overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+        <div className="registry-panel rounded-2xl border border-slate-200/90 bg-white shadow-xs overflow-hidden">
+          <div className="registry-panel-heading px-6 py-4 border-b border-slate-100 flex items-center justify-between">
             <span className="font-bold text-slate-900 text-sm">
               Lista de Pacientes ({pacientesFiltrados.length})
             </span>
@@ -201,7 +223,7 @@ export default function PacientesPage() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm text-slate-700">
+            <table className="registry-table w-full text-left text-sm text-slate-700">
               <thead className="bg-slate-50/80 text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100">
                 <tr>
                   <th className="px-6 py-3.5">Paciente</th>
@@ -295,13 +317,14 @@ export default function PacientesPage() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="clinical-form space-y-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label htmlFor="patient-name" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                 Nombre Completo *
               </label>
               <input
                 type="text"
+                id="patient-name"
                 name="nombre"
                 required
                 value={formData.nombre}
@@ -313,11 +336,12 @@ export default function PacientesPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                <label htmlFor="patient-document" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Documento de Identidad *
                 </label>
                 <input
                   type="text"
+                  id="patient-document"
                   name="documento"
                   required
                   value={formData.documento}
@@ -328,11 +352,12 @@ export default function PacientesPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                <label htmlFor="patient-phone" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Teléfono de Contacto *
                 </label>
                 <input
                   type="tel"
+                  id="patient-phone"
                   name="telefono"
                   required
                   value={formData.telefono}
@@ -345,11 +370,12 @@ export default function PacientesPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                <label htmlFor="patient-email" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Correo Electrónico *
                 </label>
                 <input
                   type="email"
+                  id="patient-email"
                   name="correo"
                   required
                   value={formData.correo}
@@ -360,11 +386,12 @@ export default function PacientesPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                <label htmlFor="patient-birthdate" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Fecha de Nacimiento *
                 </label>
                 <input
                   type="date"
+                  id="patient-birthdate"
                   name="fechaNacimiento"
                   required
                   max={new Date().toISOString().split("T")[0]}

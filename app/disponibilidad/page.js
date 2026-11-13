@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState } from "react";
 import LayoutWrapper from "@/components/LayoutWrapper";
 import Modal from "@/components/Modal";
 import {
@@ -13,15 +13,20 @@ import {
   RefreshCw,
   Clock,
   MapPin,
-  Stethoscope,
-  UserCheck,
-  Check,
   X,
   Calendar,
   Layers,
 } from "lucide-react";
 
 import { DIAS_SEMANA, FRANJAS_HORARIAS_EJEMPLO } from "@/lib/seedData";
+
+function fechaVisible(value) {
+  if (!value) return "Fecha sin asignar";
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return Number.isNaN(parsed.getTime()) ? value : new Intl.DateTimeFormat("es-CO", {
+    weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC",
+  }).format(parsed);
+}
 
 export default function DisponibilidadPage() {
   const [disponibilidades, setDisponibilidades] = useState([]);
@@ -60,28 +65,6 @@ export default function DisponibilidadPage() {
   const [mensajeExito, setMensajeExito] = useState("");
   const [mensajeError, setMensajeError] = useState("");
 
-  const cargarCatalogos = async () => {
-    try {
-      const [resMed, resCons, resEsp] = await Promise.all([
-        fetch("/api/medicos"),
-        fetch("/api/consultorios"),
-        fetch("/api/especialidades"),
-      ]);
-
-      const [jsonMed, jsonCons, jsonEsp] = await Promise.all([
-        resMed.json(),
-        resCons.json(),
-        resEsp.json(),
-      ]);
-
-      if (jsonMed.success && Array.isArray(jsonMed.data)) setMedicos(jsonMed.data);
-      if (jsonCons.success && Array.isArray(jsonCons.data)) setConsultorios(jsonCons.data);
-      if (jsonEsp.success && Array.isArray(jsonEsp.data)) setEspecialidades(jsonEsp.data);
-    } catch (err) {
-      console.error("Error al cargar catálogos:", err);
-    }
-  };
-
   const cargarDatos = async () => {
     try {
       setCargando(true);
@@ -101,25 +84,78 @@ export default function DisponibilidadPage() {
         resHor.json(),
       ]);
 
-      if (jsonDisp.success && Array.isArray(jsonDisp.data)) {
-        setDisponibilidades(jsonDisp.data);
+      if (!resDisp.ok || !jsonDisp.success || !Array.isArray(jsonDisp.data)
+        || !resHor.ok || !jsonHor.success || !Array.isArray(jsonHor.data)) {
+        throw new Error("No fue posible consultar las disponibilidades y horarios.");
       }
-      if (jsonHor.success && Array.isArray(jsonHor.data)) {
-        setHorarios(jsonHor.data);
-      }
-    } catch {
-      setMensajeError("Error de conexión al cargar las disponibilidades.");
+
+      setDisponibilidades(jsonDisp.data);
+      setHorarios(jsonHor.data);
+      setMensajeError("");
+    } catch (error) {
+      setMensajeError(error.message || "Error de conexión al cargar las disponibilidades.");
     } finally {
       setCargando(false);
     }
   };
 
   useEffect(() => {
-    cargarCatalogos();
+    let activo = true;
+    Promise.all([fetch("/api/medicos"), fetch("/api/consultorios"), fetch("/api/especialidades")])
+      .then(async ([medicosResponse, consultoriosResponse, especialidadesResponse]) => {
+        const [medicosJson, consultoriosJson, especialidadesJson] = await Promise.all([
+          medicosResponse.json(), consultoriosResponse.json(), especialidadesResponse.json(),
+        ]);
+        if (!medicosResponse.ok || !medicosJson.success || !Array.isArray(medicosJson.data)
+          || !consultoriosResponse.ok || !consultoriosJson.success || !Array.isArray(consultoriosJson.data)
+          || !especialidadesResponse.ok || !especialidadesJson.success || !Array.isArray(especialidadesJson.data)) {
+          throw new Error("No fue posible consultar los catálogos de médicos, consultorios y especialidades.");
+        }
+        return [medicosJson.data, consultoriosJson.data, especialidadesJson.data];
+      })
+      .then(([medicosData, consultoriosData, especialidadesData]) => {
+        if (!activo) return;
+        setMedicos(medicosData);
+        setConsultorios(consultoriosData);
+        setEspecialidades(especialidadesData);
+      })
+      .catch((error) => { if (activo) setMensajeError(error.message || "Error al cargar los catálogos."); });
+
+    return () => { activo = false; };
   }, []);
 
   useEffect(() => {
-    cargarDatos();
+    let activo = true;
+    const params = new URLSearchParams();
+    if (filtroMedico) params.append("documento_de_identidad", filtroMedico);
+    if (filtroFecha) params.append("fecha", filtroFecha);
+    if (filtroEspecialidad) params.append("especialidad", filtroEspecialidad);
+    if (filtroEstado !== "") params.append("estado", filtroEstado);
+
+    Promise.all([
+      fetch(`/api/disponibilidades?${params.toString()}`),
+      fetch(`/api/horarios${filtroMedico ? `?documento_de_identidad=${encodeURIComponent(filtroMedico)}` : ""}`),
+    ])
+      .then(async ([disponibilidadesResponse, horariosResponse]) => {
+        const [disponibilidadesJson, horariosJson] = await Promise.all([
+          disponibilidadesResponse.json(), horariosResponse.json(),
+        ]);
+        if (!disponibilidadesResponse.ok || !disponibilidadesJson.success || !Array.isArray(disponibilidadesJson.data)
+          || !horariosResponse.ok || !horariosJson.success || !Array.isArray(horariosJson.data)) {
+          throw new Error("No fue posible actualizar los horarios y las disponibilidades.");
+        }
+        return [disponibilidadesJson.data, horariosJson.data];
+      })
+      .then(([disponibilidadesData, horariosData]) => {
+        if (!activo) return;
+        setDisponibilidades(disponibilidadesData);
+        setHorarios(horariosData);
+        setMensajeError("");
+      })
+      .catch((error) => { if (activo) setMensajeError(error.message || "Error de conexión al cargar las disponibilidades."); })
+      .finally(() => { if (activo) setCargando(false); });
+
+    return () => { activo = false; };
   }, [filtroMedico, filtroFecha, filtroEspecialidad, filtroEstado]);
 
   // Manejar creación de Disponibilidad
@@ -191,18 +227,22 @@ export default function DisponibilidadPage() {
   };
 
   const limpiarFiltros = () => {
+    setCargando(true);
     setFiltroMedico("");
     setFiltroEspecialidad("");
     setFiltroFecha("");
     setFiltroEstado("");
   };
 
+  const cuposLibres = disponibilidades.filter((item) => Number(item.estado) === 1).length;
+  const cuposOcupados = disponibilidades.filter((item) => Number(item.estado) === 0).length;
+
   return (
     <LayoutWrapper
       title="Horarios y Disponibilidad Médica"
       subtitle="Programación de cupos de atención, consultorios y calendario semanal"
     >
-      <div className="space-y-6">
+      <div className="space-y-6 availability-page">
         {/* Notificaciones */}
         {mensajeExito && (
           <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900 shadow-xs">
@@ -218,11 +258,24 @@ export default function DisponibilidadPage() {
           </div>
         )}
 
+        <section className="module-intro">
+          <span className="module-intro-icon"><CalendarClock size={20} /></span>
+          <div className="module-intro-copy"><span>PROGRAMACIÓN CLÍNICA</span><h2>Horarios y cupos</h2><p>Consulta las asignaciones semanales y el estado real de cada espacio de atención.</p></div>
+          <div className="module-count"><strong>{disponibilidades.length}</strong><span>cupo{disponibilidades.length === 1 ? "" : "s"} en vista</span></div>
+        </section>
+
+        <section className="availability-summary" aria-label="Resumen de cupos">
+          <article className="availability-summary-card"><span className="availability-summary-mark free-mark"><CheckCircle2 size={16} /></span><div><strong>{cargando ? "—" : cuposLibres}</strong><span>Libres</span></div><small>Listos para reservar</small></article>
+          <article className="availability-summary-card"><span className="availability-summary-mark busy-mark"><Clock size={16} /></span><div><strong>{cargando ? "—" : cuposOcupados}</strong><span>Ocupados</span></div><small>Ya asignados a una cita</small></article>
+          <article className="availability-summary-card"><span className="availability-summary-mark calendar-mark"><CalendarDays size={16} /></span><div><strong>{cargando ? "—" : horarios.length}</strong><span>Horarios semanales</span></div><small>Patrones de atención</small></article>
+        </section>
+
         {/* Barra superior con pestañas y botones de acción */}
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
+        <div className="availability-toolbar flex flex-col lg:flex-row lg:items-center justify-between gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
           {/* Selector de pestañas */}
           <div className="flex items-center gap-2 rounded-xl bg-slate-100 p-1.5">
             <button
+              type="button"
               onClick={() => setPestanaActiva("disponibilidades")}
               className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs sm:text-sm font-bold transition ${
                 pestanaActiva === "disponibilidades"
@@ -234,6 +287,7 @@ export default function DisponibilidadPage() {
               <span>Espacios de Disponibilidad ({disponibilidades.length})</span>
             </button>
             <button
+              type="button"
               onClick={() => setPestanaActiva("horarios")}
               className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs sm:text-sm font-bold transition ${
                 pestanaActiva === "horarios"
@@ -242,14 +296,15 @@ export default function DisponibilidadPage() {
               }`}
             >
               <Layers className="h-4 w-4" />
-              <span>Días Habituales ({horarios.length})</span>
+              <span>Horarios semanales ({horarios.length})</span>
             </button>
           </div>
 
           {/* Botones para abrir modales */}
           <div className="flex items-center gap-3">
             <button
-              onClick={cargarDatos}
+              type="button"
+              onClick={() => { setCargando(true); cargarDatos(); }}
               className="rounded-xl border border-slate-200 p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-50 transition"
               title="Recargar"
             >
@@ -304,7 +359,7 @@ export default function DisponibilidadPage() {
                 </label>
                 <select
                   value={filtroMedico}
-                  onChange={(e) => setFiltroMedico(e.target.value)}
+                  onChange={(e) => { setCargando(true); setFiltroMedico(e.target.value); }}
                   className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 text-xs sm:text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden"
                 >
                   <option value="">Todos los médicos</option>
@@ -323,7 +378,7 @@ export default function DisponibilidadPage() {
                 </label>
                 <select
                   value={filtroEspecialidad}
-                  onChange={(e) => setFiltroEspecialidad(e.target.value)}
+                  onChange={(e) => { setCargando(true); setFiltroEspecialidad(e.target.value); }}
                   className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 text-xs sm:text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden"
                 >
                   <option value="">Todas las especialidades</option>
@@ -343,7 +398,7 @@ export default function DisponibilidadPage() {
                 <input
                   type="date"
                   value={filtroFecha}
-                  onChange={(e) => setFiltroFecha(e.target.value)}
+                  onChange={(e) => { setCargando(true); setFiltroFecha(e.target.value); }}
                   className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 text-xs sm:text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden"
                 />
               </div>
@@ -355,7 +410,7 @@ export default function DisponibilidadPage() {
                 </label>
                 <select
                   value={filtroEstado}
-                  onChange={(e) => setFiltroEstado(e.target.value)}
+                  onChange={(e) => { setCargando(true); setFiltroEstado(e.target.value); }}
                   className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 text-xs sm:text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden"
                 >
                   <option value="">Todos los estados</option>
@@ -380,7 +435,7 @@ export default function DisponibilidadPage() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm text-slate-700">
+            <table className="registry-table availability-table w-full text-left text-sm text-slate-700">
                 <thead className="bg-slate-50/80 text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100">
                   <tr>
                     <th className="px-6 py-3.5">Fecha y Horario</th>
@@ -418,7 +473,7 @@ export default function DisponibilidadPage() {
                       return (
                         <tr
                           key={disp.id}
-                          className="hover:bg-slate-50/80 transition-colors"
+                          className={`availability-row ${estaLibre ? "is-free" : "is-occupied"}`}
                         >
                           <td className="px-6 py-4 whitespace-nowrap">
                             <div className="flex items-center gap-2 font-bold text-slate-900">
@@ -427,13 +482,13 @@ export default function DisponibilidadPage() {
                             </div>
                             <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
                               <Calendar className="h-3 w-3 text-slate-400" />
-                              {disp.fecha}
+                              {fechaVisible(disp.fecha)}
                             </div>
                           </td>
 
                           <td className="px-6 py-4">
                             <div className="font-bold text-slate-900">
-                              Dr(a). {disp.medicoNombre}
+                              Dr(a). {disp.medicoNombre || `Médico ${disp.documento_de_identidad || ""}`}
                             </div>
                             <div className="text-xs text-blue-600 font-semibold">
                               {disp.especialidad} (Doc: {disp.documento_de_identidad})
@@ -451,12 +506,12 @@ export default function DisponibilidadPage() {
                             {estaLibre ? (
                               <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 border border-emerald-200">
                                 <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                                1 - Disponible
+                                Libre
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600 border border-slate-200">
                                 <Clock className="h-3.5 w-3.5 text-slate-500" />
-                                0 - Ocupado
+                                Ocupado
                               </span>
                             )}
                           </td>
@@ -486,7 +541,7 @@ export default function DisponibilidadPage() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm text-slate-700">
+            <table className="registry-table w-full text-left text-sm text-slate-700">
                 <thead className="bg-slate-50/80 text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100">
                   <tr>
                     <th className="px-6 py-3.5">Médico</th>
@@ -542,12 +597,13 @@ export default function DisponibilidadPage() {
             </div>
           )}
 
-          <form onSubmit={handleCrearDisponibilidad} className="space-y-4">
+          <form onSubmit={handleCrearDisponibilidad} className="clinical-form space-y-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label htmlFor="slot-doctor" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                 Médico Especialista *
               </label>
               <select
+                id="slot-doctor"
                 required
                 value={formDisp.documento_de_identidad}
                 onChange={(e) =>
@@ -575,10 +631,11 @@ export default function DisponibilidadPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label htmlFor="slot-room" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                 Consultorio / Sala *
               </label>
               <select
+                id="slot-room"
                 required
                 value={formDisp.id_sala}
                 onChange={(e) =>
@@ -597,11 +654,12 @@ export default function DisponibilidadPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                <label htmlFor="slot-date" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Fecha Concreta *
                 </label>
                 <input
                   type="date"
+                  id="slot-date"
                   required
                   min={new Date().toISOString().split("T")[0]}
                   value={formDisp.fecha}
@@ -613,10 +671,11 @@ export default function DisponibilidadPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                <label htmlFor="slot-time" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Franja Horaria *
                 </label>
                 <select
+                  id="slot-time"
                   required
                   value={formDisp.horario_atencion}
                   onChange={(e) =>
@@ -679,12 +738,13 @@ export default function DisponibilidadPage() {
             </div>
           )}
 
-          <form onSubmit={handleCrearHorario} className="space-y-4">
+          <form onSubmit={handleCrearHorario} className="clinical-form space-y-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label htmlFor="weekly-doctor" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                 Médico *
               </label>
               <select
+                id="weekly-doctor"
                 required
                 value={formHorario.documento_de_identidad}
                 onChange={(e) =>
@@ -708,10 +768,11 @@ export default function DisponibilidadPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label htmlFor="weekly-day" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                 Día de la Semana *
               </label>
               <select
+                id="weekly-day"
                 required
                 value={formHorario.dia_semana}
                 onChange={(e) =>

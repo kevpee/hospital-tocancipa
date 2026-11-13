@@ -49,25 +49,50 @@ export default function MedicosPage() {
         resEsp.json(),
       ]);
 
-      if (jsonMed.success && Array.isArray(jsonMed.data)) {
-        setMedicos(jsonMed.data);
+      if (!resMed.ok || !jsonMed.success || !Array.isArray(jsonMed.data)
+        || !resEsp.ok || !jsonEsp.success || !Array.isArray(jsonEsp.data)) {
+        throw new Error("No fue posible consultar el equipo médico y sus especialidades.");
       }
 
-      if (jsonEsp.success && Array.isArray(jsonEsp.data)) {
-        setEspecialidades(jsonEsp.data);
-        if (jsonEsp.data.length > 0 && !formData.especialidadId) {
-          setFormData((prev) => ({ ...prev, especialidadId: jsonEsp.data[0].id }));
-        }
-      }
-    } catch {
-      setMensajeError("Error al cargar los médicos y especialidades desde la API.");
+      setMedicos(jsonMed.data);
+      setEspecialidades(jsonEsp.data);
+      setFormData((previous) => previous.especialidadId || !jsonEsp.data.length
+        ? previous
+        : { ...previous, especialidadId: jsonEsp.data[0].id });
+      setMensajeError("");
+    } catch (error) {
+      setMensajeError(error.message || "Error al cargar los médicos y especialidades desde la API.");
     } finally {
       setCargando(false);
     }
   };
 
   useEffect(() => {
-    cargarDatos();
+    let activo = true;
+    Promise.all([fetch("/api/medicos"), fetch("/api/especialidades")])
+      .then(async ([medicosResponse, especialidadesResponse]) => {
+        const [medicosJson, especialidadesJson] = await Promise.all([
+          medicosResponse.json(),
+          especialidadesResponse.json(),
+        ]);
+        if (!medicosResponse.ok || !medicosJson.success || !Array.isArray(medicosJson.data)
+          || !especialidadesResponse.ok || !especialidadesJson.success || !Array.isArray(especialidadesJson.data)) {
+          throw new Error("No fue posible consultar el directorio médico y sus especialidades.");
+        }
+        return [medicosJson.data, especialidadesJson.data];
+      })
+      .then(([medicosData, especialidadesData]) => {
+        if (!activo) return;
+        setMedicos(medicosData);
+        setEspecialidades(especialidadesData);
+        setFormData((previous) => previous.especialidadId || !especialidadesData.length
+          ? previous
+          : { ...previous, especialidadId: especialidadesData[0].id });
+      })
+      .catch((error) => { if (activo) setMensajeError(error.message || "Error al cargar los médicos y especialidades desde la API."); })
+      .finally(() => { if (activo) setCargando(false); });
+
+    return () => { activo = false; };
   }, []);
 
   const handleChange = (e) => {
@@ -120,9 +145,8 @@ export default function MedicosPage() {
 
       const resMed = await fetch("/api/medicos");
       const jsonMed = await resMed.json();
-      if (jsonMed.success && Array.isArray(jsonMed.data)) {
-        setMedicos(jsonMed.data);
-      }
+      if (!resMed.ok || !jsonMed.success || !Array.isArray(jsonMed.data)) throw new Error(jsonMed.message || "No fue posible actualizar el directorio médico.");
+      setMedicos(jsonMed.data);
     } catch (err) {
       setMensajeError(err.message || "Error al procesar la solicitud.");
     } finally {
@@ -150,7 +174,7 @@ export default function MedicosPage() {
       title="Cuerpo Médico Especializado"
       subtitle="Directorio de profesionales de la salud, credenciales y asignación de disponibilidad"
     >
-      <div className="space-y-6">
+      <div className="space-y-6 registry-page">
         {/* Notificaciones */}
         {mensajeExito && (
           <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900 shadow-xs">
@@ -166,12 +190,19 @@ export default function MedicosPage() {
           </div>
         )}
 
+        <section className="module-intro">
+          <span className="module-intro-icon"><Stethoscope size={20} /></span>
+          <div className="module-intro-copy"><span>DIRECTORIO CLÍNICO</span><h2>Equipo médico</h2><p>Profesionales, especialidades y acceso a sus horarios de atención.</p></div>
+          <div className="module-count"><strong>{medicos.length}</strong><span>profesionales</span></div>
+        </section>
+
         {/* Barra de Acciones y Búsqueda */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
           <div className="relative w-full sm:w-80">
             <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
             <input
               type="text"
+              aria-label="Buscar médicos por nombre, documento o especialidad"
               value={busqueda}
               onChange={(e) => setBusqueda(e.target.value)}
               placeholder="Buscar por médico, documento o especialidad..."
@@ -201,8 +232,8 @@ export default function MedicosPage() {
         </div>
 
         {/* TABLA PRINCIPAL DE MÉDICOS */}
-        <div className="rounded-2xl border border-slate-200/90 bg-white shadow-xs overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+        <div className="registry-panel rounded-2xl border border-slate-200/90 bg-white shadow-xs overflow-hidden">
+          <div className="registry-panel-heading px-6 py-4 border-b border-slate-100 flex items-center justify-between">
             <span className="font-bold text-slate-900 text-sm">
               Especialistas Registrados ({medicosFiltrados.length})
             </span>
@@ -212,7 +243,7 @@ export default function MedicosPage() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm text-slate-700">
+            <table className="registry-table w-full text-left text-sm text-slate-700">
               <thead className="bg-slate-50/80 text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100">
                 <tr>
                   <th className="px-6 py-3.5">Médico</th>
@@ -323,13 +354,14 @@ export default function MedicosPage() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="clinical-form space-y-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label htmlFor="doctor-name" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                 Nombre Completo del Médico *
               </label>
               <input
                 type="text"
+                id="doctor-name"
                 name="nombre"
                 required
                 value={formData.nombre}
@@ -340,11 +372,12 @@ export default function MedicosPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label htmlFor="doctor-document" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                 Documento de Identidad (Clave Primaria) *
               </label>
               <input
                 type="text"
+                id="doctor-document"
                 name="documento"
                 required
                 value={formData.documento}
@@ -358,11 +391,12 @@ export default function MedicosPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label htmlFor="doctor-specialty" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                 Especialidad Médica *
               </label>
               <select
                 name="especialidadId"
+                id="doctor-specialty"
                 required
                 value={formData.especialidadId}
                 onChange={handleChange}

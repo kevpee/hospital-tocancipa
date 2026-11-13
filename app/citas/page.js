@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LayoutWrapper from "@/components/LayoutWrapper";
 import Modal from "@/components/Modal";
 import {
@@ -13,25 +13,59 @@ import {
   RefreshCw,
   Clock,
   MapPin,
-  Stethoscope,
   User,
   X,
   Check,
   Calendar,
-  Layers,
-  Sparkles,
+  ChevronLeft,
+  ChevronRight,
+  CalendarCheck2,
+  CircleCheck,
 } from "lucide-react";
+
+function fechaHoyColombia() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
+}
+
+function horaAhoraColombia() {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: "America/Bogota", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date());
+}
+
+function fechaLegible(fecha, options = { weekday: "long", day: "numeric", month: "long", year: "numeric" }) {
+  if (!fecha) return "";
+  return new Intl.DateTimeFormat("es-CO", { ...options, timeZone: "UTC" }).format(new Date(`${fecha}T12:00:00Z`));
+}
+
+function normalizarTexto(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
+function nombreEspecialidad(medico) {
+  return typeof medico?.especialidad === "object" && medico.especialidad !== null
+    ? medico.especialidad.nombre || "General"
+    : String(medico?.especialidad || "General");
+}
+
+function idMedico(medico) {
+  return String(medico?.documento_de_identidad || medico?.documento || medico?.id || "");
+}
+
+function idDisponibilidad(disponibilidad) {
+  return String(disponibilidad?.id || disponibilidad?.id_disponibilidad || "");
+}
 
 export default function CitasPage() {
   const [citas, setCitas] = useState([]);
   const [pacientes, setPacientes] = useState([]);
   const [especialidades, setEspecialidades] = useState([]);
   const [medicos, setMedicos] = useState([]);
-  const [consultorios, setConsultorios] = useState([]);
 
-  // Disponibilidades libres para el agendamiento guiado
-  const [disponibilidadesLibres, setDisponibilidadesLibres] = useState([]);
-  const [cargandoDisponibilidades, setCargandoDisponibilidades] = useState(false);
+  // Snapshot de horarios reales consultados mediante la API del servidor.
+  const [disponibilidades, setDisponibilidades] = useState([]);
+  const [cargandoDisponibilidades, setCargandoDisponibilidades] = useState(true);
+  const [errorDisponibilidades, setErrorDisponibilidades] = useState("");
+  const [errorCatalogos, setErrorCatalogos] = useState("");
+  const [paginaFechas, setPaginaFechas] = useState(0);
 
   const [cargando, setCargando] = useState(true);
   const [enviando, setEnviando] = useState(false);
@@ -56,33 +90,36 @@ export default function CitasPage() {
     id_disponibilidad: "",
     motivo: "",
   });
+  const disponibilidadEnCurso = useRef(false);
 
-  const cargarCatalogos = async () => {
+  const cargarCatalogos = useCallback(async () => {
     try {
-      const [resPac, resEsp, resMed, resCons] = await Promise.all([
+      const [resPac, resEsp, resMed] = await Promise.all([
         fetch("/api/pacientes"),
         fetch("/api/especialidades"),
         fetch("/api/medicos"),
-        fetch("/api/consultorios"),
       ]);
 
-      const [jsonPac, jsonEsp, jsonMed, jsonCons] = await Promise.all([
+      const [jsonPac, jsonEsp, jsonMed] = await Promise.all([
         resPac.json(),
         resEsp.json(),
         resMed.json(),
-        resCons.json(),
       ]);
+
+      if (!resPac.ok || !jsonPac.success || !resEsp.ok || !jsonEsp.success || !resMed.ok || !jsonMed.success) {
+        throw new Error("No fue posible cargar los pacientes, especialidades o médicos.");
+      }
 
       if (jsonPac.success && Array.isArray(jsonPac.data)) setPacientes(jsonPac.data);
       if (jsonEsp.success && Array.isArray(jsonEsp.data)) setEspecialidades(jsonEsp.data);
       if (jsonMed.success && Array.isArray(jsonMed.data)) setMedicos(jsonMed.data);
-      if (jsonCons.success && Array.isArray(jsonCons.data)) setConsultorios(jsonCons.data);
+      setErrorCatalogos("");
     } catch (err) {
-      console.error("Error al cargar catálogos:", err);
+      setErrorCatalogos(err.message || "Error al cargar los datos necesarios para agendar.");
     }
-  };
+  }, []);
 
-  const cargarCitas = async () => {
+  const cargarCitas = useCallback(async () => {
     try {
       setCargando(true);
       const params = new URLSearchParams();
@@ -102,62 +139,135 @@ export default function CitasPage() {
     } finally {
       setCargando(false);
     }
-  };
-
-  useEffect(() => {
-    cargarCatalogos();
-  }, []);
-
-  useEffect(() => {
-    cargarCitas();
   }, [filtroMedico, filtroFecha, filtroEstado]);
 
-  // Médicos filtrados por la especialidad seleccionada en el formulario
-  const medicosFiltradosPorEspecialidad = medicos.filter((m) => {
-    if (!formCita.especialidadId) return true;
-    const espNombre =
-      typeof m.especialidad === "object" && m.especialidad !== null
-        ? m.especialidad.nombre
-        : String(m.especialidad || "");
-    const espSeleccionada = especialidades.find(
-      (e) => String(e.id) === String(formCita.especialidadId)
-    );
-    return espSeleccionada ? espNombre.toLowerCase() === espSeleccionada.nombre.toLowerCase() : true;
-  });
+  // Estas consultas externas llenan el estado al resolverse; la regla las interpreta como síncronas.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { cargarCatalogos(); }, [cargarCatalogos]);
 
-  // Cuando cambian médico o fecha en el formulario, cargar ÚNICAMENTE disponibilidades libres (estado: 1)
+  // Al cambiar filtros se inicia una lectura y el indicador acompaña la petición.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { cargarCitas(); }, [cargarCitas]);
+
+  const cargarDisponibilidades = useCallback(async ({ silencioso = false } = {}) => {
+    if (disponibilidadEnCurso.current) return null;
+    disponibilidadEnCurso.current = true;
+    if (!silencioso) setCargandoDisponibilidades(true);
+    try {
+      const response = await fetch("/api/disponibilidades", { cache: "no-store" });
+      const result = await response.json();
+      if (!response.ok || !result?.success || !Array.isArray(result.data)) {
+        throw new Error(result?.message || "No fue posible consultar la disponibilidad actual.");
+      }
+      setDisponibilidades(result.data);
+      setErrorDisponibilidades("");
+      return result.data;
+    } catch (error) {
+      setErrorDisponibilidades(error.message || "No fue posible consultar los cupos.");
+      return null;
+    } finally {
+      setCargandoDisponibilidades(false);
+      disponibilidadEnCurso.current = false;
+    }
+  }, []);
+
+  // La carga inicial sincroniza el componente con la API; las actualizaciones son asíncronas.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { cargarDisponibilidades(); }, [cargarDisponibilidades]);
+
+  // Mientras se diligencia el formulario, refrescar para reflejar reservas hechas en otra sesión.
   useEffect(() => {
-    const consultarDisponibilidadesLibres = async () => {
-      if (!formCita.medicoId || !formCita.fecha) {
-        setDisponibilidadesLibres([]);
-        return;
-      }
-
-      try {
-        setCargandoDisponibilidades(true);
-        const res = await fetch(
-          `/api/disponibilidades?documento_de_identidad=${formCita.medicoId}&fecha=${formCita.fecha}&soloDisponibles=true`
-        );
-        const json = await res.json();
-        if (json.success && Array.isArray(json.data)) {
-          // Filtrar rigurosamente solo las que tengan estado == 1
-          const libres = json.data.filter((d) => Number(d.estado) === 1);
-          setDisponibilidadesLibres(libres);
-          if (libres.length > 0 && !formCita.id_disponibilidad) {
-            setFormCita((prev) => ({ ...prev, id_disponibilidad: libres[0].id }));
-          }
-        } else {
-          setDisponibilidadesLibres([]);
-        }
-      } catch {
-        setDisponibilidadesLibres([]);
-      } finally {
-        setCargandoDisponibilidades(false);
-      }
+    if (!modalAbierto) return undefined;
+    const timer = window.setInterval(() => cargarDisponibilidades({ silencioso: true }), 30000);
+    const onFocus = () => cargarDisponibilidades({ silencioso: true });
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
     };
+  }, [modalAbierto, cargarDisponibilidades]);
 
-    consultarDisponibilidadesLibres();
-  }, [formCita.medicoId, formCita.fecha]);
+  const hoyStr = fechaHoyColombia();
+  const ahoraColombia = horaAhoraColombia();
+  const medicosFiltradosPorEspecialidad = useMemo(() => medicos.filter((medico) => {
+    if (!formCita.especialidadId) return true;
+    const especialidad = especialidades.find((item) => String(item.id) === String(formCita.especialidadId));
+    return !especialidad || normalizarTexto(nombreEspecialidad(medico)) === normalizarTexto(especialidad.nombre);
+  }), [medicos, especialidades, formCita.especialidadId]);
+
+  const opcionesDisponibilidad = useMemo(() => disponibilidades
+    .filter((item) => {
+      if (!item.fecha || String(item.fecha) < hoyStr) return false;
+      if (Number(item.estado) !== 0 && Number(item.estado) !== 1) return false;
+      if (String(item.fecha) === hoyStr) {
+        const horaInicio = String(item.horario_atencion || "").match(/\b(\d{1,2}:\d{2})\b/)?.[1];
+        if (horaInicio && horaInicio.padStart(5, "0") < ahoraColombia) return false;
+      }
+      const medico = medicos.find((entry) => idMedico(entry) === String(item.documento_de_identidad || ""));
+      const especialidad = medico ? nombreEspecialidad(medico) : item.especialidad;
+      if (formCita.medicoId && String(item.documento_de_identidad) !== String(formCita.medicoId)) return false;
+      if (formCita.especialidadId) {
+        const selected = especialidades.find((entry) => String(entry.id) === String(formCita.especialidadId));
+        if (selected && normalizarTexto(especialidad) !== normalizarTexto(selected.nombre)) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => `${a.fecha} ${a.horario_atencion || ""}`.localeCompare(`${b.fecha} ${b.horario_atencion || ""}`)),
+  [disponibilidades, hoyStr, ahoraColombia, medicos, formCita.medicoId, formCita.especialidadId, especialidades]);
+
+  const gruposPorFecha = useMemo(() => {
+    const groups = new Map();
+    opcionesDisponibilidad.forEach((item) => {
+      if (!groups.has(item.fecha)) groups.set(item.fecha, { fecha: item.fecha, items: [], libres: 0, ocupados: 0 });
+      const group = groups.get(item.fecha);
+      group.items.push(item);
+      if (Number(item.estado) === 1) group.libres += 1;
+      else group.ocupados += 1;
+    });
+    return Array.from(groups.values());
+  }, [opcionesDisponibilidad]);
+
+  const gruposPagina = gruposPorFecha.slice(paginaFechas * 7, paginaFechas * 7 + 7);
+  const grupoElegido = gruposPorFecha.find((group) => group.fecha === formCita.fecha)
+    || gruposPagina.find((group) => group.libres > 0)
+    || gruposPagina[0]
+    || null;
+  const fechaElegida = grupoElegido?.fecha || "";
+  const horariosFecha = grupoElegido?.items || [];
+  const cupoElegido = horariosFecha.find((item) => idDisponibilidad(item) === formCita.id_disponibilidad && Number(item.estado) === 1);
+  const fechasVisibles = gruposPagina;
+  const proximosCupos = disponibilidades
+    .filter((item) => {
+      if (String(item.fecha || "") < hoyStr || Number(item.estado) !== 1) return false;
+      if (String(item.fecha) === hoyStr) {
+        const start = String(item.horario_atencion || "").match(/\b(\d{1,2}:\d{2})\b/)?.[1];
+        if (start && start.padStart(5, "0") < ahoraColombia) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => `${a.fecha} ${a.horario_atencion || ""}`.localeCompare(`${b.fecha} ${b.horario_atencion || ""}`))
+    .slice(0, 4);
+
+  const abrirAgendamiento = (slot = null) => {
+    setMensajeError("");
+    setMensajeExito("");
+    setPaginaFechas(0);
+    if (slot) {
+      const profesional = medicos.find((item) => idMedico(item) === String(slot.documento_de_identidad || ""));
+      const specialty = especialidades.find((item) => normalizarTexto(item.nombre) === normalizarTexto(nombreEspecialidad(profesional)));
+      setFormCita((previous) => ({
+        ...previous,
+        medicoId: String(slot.documento_de_identidad || ""),
+        especialidadId: specialty?.id || "",
+        fecha: slot.fecha,
+        id_disponibilidad: idDisponibilidad(slot),
+      }));
+    } else {
+      setFormCita((previous) => ({ ...previous, especialidadId: "", medicoId: "", fecha: "", id_disponibilidad: "" }));
+    }
+    setModalAbierto(true);
+    cargarDisponibilidades({ silencioso: true });
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -169,18 +279,13 @@ export default function CitasPage() {
       return;
     }
 
-    if (!formCita.medicoId) {
-      setMensajeError("Paso 3: Debe seleccionar el médico especialista.");
+    if (!fechaElegida) {
+      setMensajeError("Selecciona una fecha que tenga cupos disponibles.");
       return;
     }
 
-    if (!formCita.fecha) {
-      setMensajeError("Paso 4: Debe seleccionar la fecha de la cita.");
-      return;
-    }
-
-    if (!formCita.id_disponibilidad) {
-      setMensajeError("Paso 5 y 6: Debe seleccionar un espacio de disponibilidad libre.");
+    if (!cupoElegido) {
+      setMensajeError("Selecciona un horario libre. El cupo pudo cambiar mientras diligenciabas la cita.");
       return;
     }
 
@@ -191,6 +296,21 @@ export default function CitasPage() {
 
     try {
       setEnviando(true);
+      const preflightParams = new URLSearchParams({
+        documento_de_identidad: String(cupoElegido.documento_de_identidad),
+        fecha: fechaElegida,
+        soloDisponibles: "true",
+      });
+      const preflightResponse = await fetch(`/api/disponibilidades?${preflightParams}`, { cache: "no-store" });
+      const preflight = await preflightResponse.json();
+      if (!preflightResponse.ok || !preflight.success || !Array.isArray(preflight.data)) {
+        throw new Error(preflight.message || "No fue posible comprobar el cupo. No se reservó la cita.");
+      }
+      const slotStillFree = preflight.data.some((item) => idDisponibilidad(item) === idDisponibilidad(cupoElegido) && Number(item.estado) === 1);
+      if (!slotStillFree) {
+        throw new Error("Este horario acaba de ocuparse. La agenda se actualizó; elige otro cupo disponible.");
+      }
+
       const res = await fetch("/api/citas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -210,7 +330,10 @@ export default function CitasPage() {
         );
       }
 
-      setMensajeExito("¡Cita médica reservada y confirmada exitosamente!");
+      const medicoConfirmado = medicos.find((item) => idMedico(item) === String(cupoElegido.documento_de_identidad));
+      const nombreMedico = medicoConfirmado?.nombre || cupoElegido.medicoNombre || "Médico";
+      const horaConfirmada = cupoElegido.horario_atencion || "";
+      setMensajeExito(`Cita confirmada con ${nombreMedico} para el ${fechaLegible(fechaElegida)} a las ${horaConfirmada}.`);
       setFormCita({
         pacienteId: "",
         especialidadId: "",
@@ -221,7 +344,9 @@ export default function CitasPage() {
       });
       setModalAbierto(false);
       await cargarCitas();
+      await cargarDisponibilidades({ silencioso: true });
     } catch (err) {
+      await cargarDisponibilidades({ silencioso: true });
       setMensajeError(err.message || "Error al procesar el agendamiento.");
     } finally {
       setEnviando(false);
@@ -252,6 +377,7 @@ export default function CitasPage() {
           : json.message
       );
       await cargarCitas();
+      await cargarDisponibilidades({ silencioso: true });
     } catch (err) {
       setMensajeError(err.message || "Error al actualizar estado.");
     } finally {
@@ -265,7 +391,14 @@ export default function CitasPage() {
     setFiltroEstado("");
   };
 
-  const hoyStr = new Date().toISOString().split("T")[0];
+  const cambiarPaginaFechas = (incremento) => {
+    const maxPagina = Math.max(0, Math.ceil(gruposPorFecha.length / 7) - 1);
+    const nuevaPagina = Math.min(maxPagina, Math.max(0, paginaFechas + incremento));
+    const grupo = gruposPorFecha.slice(nuevaPagina * 7, nuevaPagina * 7 + 7).find((item) => item.libres > 0)
+      || gruposPorFecha[nuevaPagina * 7];
+    setPaginaFechas(nuevaPagina);
+    if (grupo) setFormCita((previous) => ({ ...previous, fecha: grupo.fecha, id_disponibilidad: "" }));
+  };
 
   return (
     <LayoutWrapper
@@ -308,10 +441,7 @@ export default function CitasPage() {
               <RefreshCw className="h-4 w-4" />
             </button>
             <button
-              onClick={() => {
-                setMensajeError("");
-                setModalAbierto(true);
-              }}
+              onClick={() => abrirAgendamiento()}
               className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs sm:text-sm font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 transition"
             >
               <Plus className="h-4 w-4" />
@@ -319,6 +449,42 @@ export default function CitasPage() {
             </button>
           </div>
         </div>
+
+        <section className="appointment-discovery" aria-labelledby="availability-heading">
+          <div className="appointment-discovery-heading">
+            <div>
+              <p className="appointment-kicker"><CalendarCheck2 size={14} /> DISPONIBILIDAD EN TIEMPO REAL</p>
+              <h3 id="availability-heading">Próximos cupos libres</h3>
+              <p>Horarios consultados desde la agenda actual. Selecciona uno para iniciar la reserva.</p>
+            </div>
+            <button type="button" className="availability-refresh" onClick={() => cargarDisponibilidades()} disabled={cargandoDisponibilidades} aria-label="Actualizar disponibilidad">
+              <RefreshCw size={15} className={cargandoDisponibilidades ? "animate-spin" : ""} />
+              <span>Actualizar</span>
+            </button>
+          </div>
+          {errorDisponibilidades ? (
+            <div className="availability-state availability-error" role="alert"><AlertCircle size={18} /><span>{errorDisponibilidades}</span><button type="button" onClick={() => cargarDisponibilidades()}>Reintentar</button></div>
+          ) : cargandoDisponibilidades ? (
+            <div className="availability-state"><RefreshCw size={17} className="animate-spin" /> Consultando cupos disponibles…</div>
+          ) : proximosCupos.length === 0 ? (
+            <div className="availability-state availability-empty"><CalendarDays size={20} /><div><strong>No hay próximos cupos disponibles</strong><span>Prueba otro momento o consulta nuevamente cuando se publiquen nuevos horarios.</span></div></div>
+          ) : (
+            <div className="next-slots-grid">
+              {proximosCupos.map((slot) => {
+                const professional = medicos.find((item) => idMedico(item) === String(slot.documento_de_identidad || ""));
+                return (
+                  <button type="button" className="next-slot-card" key={idDisponibilidad(slot)} onClick={() => abrirAgendamiento(slot)}>
+                    <span className="next-slot-date"><CalendarDays size={14} />{fechaLegible(slot.fecha, { weekday: "short", day: "numeric", month: "short" })}</span>
+                    <strong>{slot.medicoNombre || professional?.nombre || "Profesional disponible"}</strong>
+                    <span>{slot.especialidad || nombreEspecialidad(professional)}</span>
+                    <span className="next-slot-meta"><span><Clock size={13} />{slot.horario_atencion}</span><span><MapPin size={13} />Consultorio {slot.consultorioNumero || slot.id_sala || "—"}</span></span>
+                    <span className="next-slot-action">Elegir horario <ChevronRight size={14} /></span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
 
         {/* PANEL DE FILTROS */}
         <div className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs space-y-4">
@@ -533,9 +699,15 @@ export default function CitasPage() {
           isOpen={modalAbierto}
           onClose={() => setModalAbierto(false)}
           title="Agendar Nueva Cita Médica"
-          subtitle="Proceso guiado de 8 pasos según el modelo de disponibilidad hospitalaria"
-          maxWidth="max-w-2xl"
+          subtitle="Elige un paciente y consulta los cupos reales disponibles"
+          maxWidth="max-w-3xl"
         >
+          {errorCatalogos && (
+            <div className="booking-inline-error mb-3" role="alert">
+              <AlertCircle size={16} /><span>{errorCatalogos}</span>
+              <button type="button" onClick={cargarCatalogos}>Reintentar</button>
+            </div>
+          )}
           {mensajeError && (
             <div className="mb-4 flex items-center gap-2.5 rounded-xl border border-rose-200 bg-rose-50 p-3 text-rose-800 text-xs font-semibold">
               <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
@@ -543,211 +715,97 @@ export default function CitasPage() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Paso 1: Seleccionar Paciente */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                Paso 1: Seleccionar Paciente *
-              </label>
-              <select
-                required
-                value={formCita.pacienteId}
-                onChange={(e) =>
-                  setFormCita((prev) => ({ ...prev, pacienteId: e.target.value }))
-                }
-                className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden transition"
-              >
-                <option value="">Seleccione el paciente...</option>
-                {pacientes.map((p) => (
-                  <option key={p.id} value={p.id_paciente || p.id}>
-                    {p.nombre} (Documento: {p.documento_de_identidad || p.documento})
-                  </option>
-                ))}
+          <form onSubmit={handleSubmit} className="booking-form">
+            <section className="booking-step">
+              <div className="booking-step-heading"><span>1</span><div><strong>Paciente</strong><small>Selecciona a quién se le asignará la cita.</small></div></div>
+              <label className="sr-only" htmlFor="booking-patient">Paciente</label>
+              <select id="booking-patient" required value={formCita.pacienteId} onChange={(event) => setFormCita((previous) => ({ ...previous, pacienteId: event.target.value }))}>
+                <option value="">Seleccionar paciente…</option>
+                {pacientes.map((patient) => <option key={patient.id} value={patient.id_paciente || patient.id}>{patient.nombre} · {patient.documento_de_identidad || patient.documento}</option>)}
               </select>
-            </div>
+            </section>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Paso 2: Seleccionar Especialidad */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Paso 2: Especialidad *
+            <section className="booking-step">
+              <div className="booking-step-heading"><span>2</span><div><strong>Profesional</strong><small>Filtra por especialidad, por médico o consulta todas las opciones.</small></div></div>
+              <div className="booking-filter-grid">
+                <label>Especialidad
+                  <select value={formCita.especialidadId} onChange={(event) => { setPaginaFechas(0); setFormCita((previous) => ({ ...previous, especialidadId: event.target.value, medicoId: "", fecha: "", id_disponibilidad: "" })); }}>
+                    <option value="">Todas las especialidades</option>
+                    {especialidades.map((specialty) => <option key={specialty.id} value={specialty.id}>{specialty.nombre}</option>)}
+                  </select>
                 </label>
-                <select
-                  required
-                  value={formCita.especialidadId}
-                  onChange={(e) =>
-                    setFormCita((prev) => ({
-                      ...prev,
-                      especialidadId: e.target.value,
-                      medicoId: "", // reset médico al cambiar especialidad
-                      id_disponibilidad: "",
-                    }))
-                  }
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden transition"
-                >
-                  <option value="">Seleccione especialidad...</option>
-                  {especialidades.map((esp) => (
-                    <option key={esp.id} value={esp.id}>
-                      {esp.nombre}
-                    </option>
-                  ))}
-                </select>
+                <label>Médico
+                  <select value={formCita.medicoId} onChange={(event) => { setPaginaFechas(0); setFormCita((previous) => ({ ...previous, medicoId: event.target.value, fecha: "", id_disponibilidad: "" })); }}>
+                    <option value="">Todos los médicos</option>
+                    {medicosFiltradosPorEspecialidad.map((doctor) => <option key={doctor.id} value={idMedico(doctor)}>{doctor.nombre}</option>)}
+                  </select>
+                </label>
               </div>
+            </section>
 
-              {/* Paso 3: Seleccionar Médico */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Paso 3: Médico Tratante *
-                </label>
-                <select
-                  required
-                  value={formCita.medicoId}
-                  onChange={(e) =>
-                    setFormCita((prev) => ({
-                      ...prev,
-                      medicoId: e.target.value,
-                      id_disponibilidad: "",
-                    }))
-                  }
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden transition"
-                >
-                  <option value="">Seleccione médico...</option>
-                  {medicosFiltradosPorEspecialidad.map((m) => {
-                    const doc = m.documento_de_identidad || m.documento;
+            <section className="booking-step">
+              <div className="booking-step-heading"><span>3</span><div><strong>Fecha de atención</strong><small>Las fechas anteriores a hoy se excluyen. Cada fecha indica sus cupos libres.</small></div></div>
+              {cargandoDisponibilidades ? (
+                <div className="booking-inline-state"><RefreshCw size={16} className="animate-spin" /> Actualizando disponibilidad real…</div>
+              ) : errorDisponibilidades ? (
+                <div className="booking-inline-error" role="alert"><AlertCircle size={16} />{errorDisponibilidades}<button type="button" onClick={() => cargarDisponibilidades()}>Reintentar</button></div>
+              ) : gruposPorFecha.length === 0 ? (
+                <div className="booking-inline-state booking-no-slots"><CalendarDays size={18} /><div><strong>No hay fechas con disponibilidad futura</strong><span>Prueba otra especialidad o médico, o vuelve a consultar más tarde.</span></div></div>
+              ) : (
+                <>
+                  <div className="date-picker-toolbar">
+                    <span>{gruposPorFecha.length} {gruposPorFecha.length === 1 ? "fecha encontrada" : "fechas encontradas"}</span>
+                    <div>
+                      <button type="button" aria-label="Fechas anteriores" disabled={paginaFechas === 0} onClick={() => cambiarPaginaFechas(-1)}><ChevronLeft size={16} /></button>
+                      <button type="button" aria-label="Fechas siguientes" disabled={(paginaFechas + 1) * 7 >= gruposPorFecha.length} onClick={() => cambiarPaginaFechas(1)}><ChevronRight size={16} /></button>
+                    </div>
+                  </div>
+                  <div className="date-picker-grid" role="group" aria-label="Fechas con horarios registrados">
+                    {fechasVisibles.map((group) => (
+                      <button type="button" key={group.fecha} aria-pressed={fechaElegida === group.fecha} className={`date-choice ${fechaElegida === group.fecha ? "is-selected" : ""} ${group.libres === 0 ? "is-full" : ""}`} onClick={() => setFormCita((previous) => ({ ...previous, fecha: group.fecha, id_disponibilidad: "" }))}>
+                        <span>{fechaLegible(group.fecha, { weekday: "short" })}</span><strong>{fechaLegible(group.fecha, { day: "numeric" })}</strong><small>{group.libres > 0 ? `${group.libres} libre${group.libres === 1 ? "" : "s"}` : `${group.ocupados} ocupado${group.ocupados === 1 ? "" : "s"}`}</small>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </section>
+
+            <section className="booking-step">
+              <div className="booking-step-heading"><span>4</span><div><strong>Horario y consultorio</strong><small>Los horarios ocupados se muestran deshabilitados y no se pueden reservar.</small></div></div>
+              {grupoElegido && horariosFecha.length > 0 ? (
+                <div className="booking-slot-grid">
+                  {horariosFecha.map((slot) => {
+                    const available = Number(slot.estado) === 1;
+                    const selected = formCita.id_disponibilidad === idDisponibilidad(slot) && available;
+                    const doctor = medicos.find((item) => idMedico(item) === String(slot.documento_de_identidad || ""));
                     return (
-                      <option key={m.id} value={doc}>
-                        {m.nombre}
-                      </option>
+                      <button type="button" key={idDisponibilidad(slot)} disabled={!available} aria-pressed={selected} className={`booking-slot ${selected ? "is-selected" : ""} ${available ? "is-free" : "is-occupied"}`} onClick={() => setFormCita((previous) => ({ ...previous, fecha: fechaElegida, id_disponibilidad: idDisponibilidad(slot) }))}>
+                        <span className="booking-slot-status">{available ? <CircleCheck size={14} /> : <XCircle size={14} />}{available ? "Libre" : "Ocupado"}</span>
+                        <strong><Clock size={15} />{slot.horario_atencion || "Hora pendiente"}</strong>
+                        <span>{slot.medicoNombre || doctor?.nombre || "Médico"} · {slot.especialidad || nombreEspecialidad(doctor)}</span>
+                        <span><MapPin size={13} />Consultorio {slot.consultorioNumero || slot.id_sala || "—"}</span>
+                      </button>
                     );
                   })}
-                </select>
-              </div>
-            </div>
-
-            {/* Paso 4: Seleccionar Fecha */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                Paso 4: Seleccionar Fecha de Atención *
-              </label>
-              <input
-                type="date"
-                required
-                min={hoyStr}
-                value={formCita.fecha}
-                onChange={(e) =>
-                  setFormCita((prev) => ({
-                    ...prev,
-                    fecha: e.target.value,
-                    id_disponibilidad: "",
-                  }))
-                }
-                className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden transition"
-              />
-            </div>
-
-            {/* Paso 5 y 6: Mostrar ÚNICAMENTE disponibilidades libres y Seleccionar Consultorio / Horario */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                Paso 5 y 6: Espacio de Disponibilidad Libre (Consultorio y Horario) *
-              </label>
-
-              {!formCita.medicoId || !formCita.fecha ? (
-                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 p-4 text-center text-xs text-slate-500">
-                  Selecciona primero el médico y la fecha para consultar los cupos libres.
-                </div>
-              ) : cargandoDisponibilidades ? (
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
-                  <RefreshCw className="h-4 w-4 animate-spin text-blue-600" />
-                  Buscando disponibilidades libres en Firestore...
-                </div>
-              ) : disponibilidadesLibres.length === 0 ? (
-                <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-4 text-center text-xs text-amber-900">
-                  <p className="font-bold">No hay cupos libres para este médico en la fecha seleccionada.</p>
-                  <p className="mt-0.5 text-amber-800">
-                    Ve a la sección &apos;Horarios y Disponibilidad&apos; para generar nuevos cupos o selecciona otra fecha.
-                  </p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-48 overflow-y-auto p-1">
-                  {disponibilidadesLibres.map((disp) => {
-                    const isSelected = formCita.id_disponibilidad === disp.id;
-                    return (
-                      <div
-                        key={disp.id}
-                        onClick={() =>
-                          setFormCita((prev) => ({
-                            ...prev,
-                            id_disponibilidad: disp.id,
-                          }))
-                        }
-                        className={`cursor-pointer rounded-xl border p-3 text-left transition ${
-                          isSelected
-                            ? "border-blue-600 bg-blue-50/90 shadow-xs"
-                            : "border-slate-200 bg-white hover:border-blue-300"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
-                            <Clock className="h-3.5 w-3.5 text-blue-600" />
-                            {disp.horario_atencion}
-                          </span>
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
-                            Libre (1)
-                          </span>
-                        </div>
-                        <div className="mt-1 text-xs text-slate-600 flex items-center gap-1">
-                          <MapPin className="h-3 w-3 text-slate-400" />
-                          Consultorio {disp.consultorioNumero}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                <div className="booking-inline-state booking-no-slots"><CalendarDays size={18} /><div><strong>{gruposPorFecha.length ? "No hay fechas para este filtro" : "No hay horarios para mostrar"}</strong><span>{gruposPorFecha.length ? "Ajusta el filtro de especialidad o médico para encontrar cupos." : "Las próximas disponibilidades aparecerán aquí."}</span></div></div>
               )}
-            </div>
+              {formCita.id_disponibilidad && !cupoElegido && <div className="booking-inline-error" role="status"><AlertCircle size={16} />El cupo seleccionado ya no está libre. La agenda se actualizará automáticamente; elige otro horario.</div>}
+              {cupoElegido && <div className="booking-confirmation"><CheckCircle2 size={17} /><span>Seleccionado: <strong>{cupoElegido.medicoNombre || "Médico"}</strong> · {fechaLegible(fechaElegida)} · {cupoElegido.horario_atencion} · Consultorio {cupoElegido.consultorioNumero || cupoElegido.id_sala || "—"}</span></div>}
+            </section>
 
-            {/* Paso 7: Motivo de la Consulta */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                Paso 7: Motivo de la Consulta *
-              </label>
-              <textarea
-                required
-                rows={2}
-                value={formCita.motivo}
-                onChange={(e) =>
-                  setFormCita((prev) => ({ ...prev, motivo: e.target.value }))
-                }
-                placeholder="Describe el motivo, síntoma o control médico..."
-                className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2 text-sm text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-hidden transition resize-none"
-              />
-            </div>
+            <section className="booking-step">
+              <div className="booking-step-heading"><span>5</span><div><strong>Motivo de consulta</strong><small>Información breve para identificar el propósito de la cita.</small></div></div>
+              <label className="sr-only" htmlFor="booking-reason">Motivo de consulta</label>
+              <textarea id="booking-reason" required minLength={4} rows={2} value={formCita.motivo} onChange={(event) => setFormCita((previous) => ({ ...previous, motivo: event.target.value }))} placeholder="Ej. Control médico, consulta general…" />
+            </section>
 
-            {/* Paso 8: Confirmar Cita Médica */}
-            <div className="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setModalAbierto(false)}
-                className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs sm:text-sm font-semibold text-slate-700 hover:bg-slate-50 transition"
-              >
-                Cancelar
-              </button>
-              <button
-                type="submit"
-                disabled={enviando || !formCita.id_disponibilidad}
-                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-xs sm:text-sm font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 disabled:opacity-50 transition"
-              >
-                {enviando ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                    Ejecutando Transacción...
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="h-4 w-4" />
-                    Paso 8: Confirmar Cita (Reserva Atómica)
-                  </>
-                )}
+            <div className="booking-footer">
+              <button type="button" className="booking-cancel" onClick={() => setModalAbierto(false)}>Cancelar</button>
+              <button type="submit" className="booking-submit" disabled={enviando || cargandoDisponibilidades || !formCita.pacienteId || !cupoElegido || !formCita.motivo.trim() || formCita.motivo.trim().length < 4}>
+                {enviando ? <><RefreshCw size={15} className="animate-spin" /> Confirmando reserva…</> : <><CheckCircle2 size={16} /> Confirmar cita</>}
               </button>
             </div>
           </form>
